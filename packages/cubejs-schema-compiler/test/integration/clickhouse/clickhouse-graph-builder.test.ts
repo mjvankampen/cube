@@ -1,3 +1,4 @@
+import { format as formatSql } from 'sqlstring';
 import { UserError } from '../../../src/compiler/UserError';
 import { prepareJsCompiler } from '../../unit/PrepareCompiler';
 import { ClickHouseDbRunner } from './ClickHouseDbRunner';
@@ -76,6 +77,10 @@ describe('ClickHouse JoinGraph', () => {
             trailing: '2 day',
             offset: 'start'
           }
+        },
+        uniqueSourceCount: {
+          type: 'countDistinctApprox',
+          sql: 'source',
         },
         countDistinctApproxRolling: {
           type: 'countDistinctApprox',
@@ -622,9 +627,7 @@ describe('ClickHouse JoinGraph', () => {
     { visitors__created_at_day: '2017-01-10T00:00:00.000Z', visitors__running_revenue_per_count: '300' }
   ]));
 
-  // FAILS ClickHouse supports multiple approximate aggregators:
-  // uniq, uniqCombined, uniqHLL12, need to pick one to use and implement it in query
-  it.skip('hll rolling', () => {
+  it('hll rolling', () => {
     const result = compiler.compile().then(() => {
       const query = new ClickHouseQuery({ joinGraph, cubeEvaluator, compiler }, {
         measures: [
@@ -643,11 +646,165 @@ describe('ClickHouse JoinGraph', () => {
 
       logSqlAndParams(query);
 
-      expect(query.buildSqlAndParams()[0]).toMatch(/HLL_COUNT\.MERGE/);
-      expect(query.buildSqlAndParams()[0]).toMatch(/HLL_COUNT\.INIT/);
+      expect(query.buildSqlAndParams()[0]).toMatch(/uniqMerge/);
+      expect(query.buildSqlAndParams()[0]).toMatch(/uniqState/);
     });
 
     return result;
+  });
+
+  it('countDistinctApprox uses uniq', () => runQueryTest({
+    measures: [
+      'visitors.uniqueSourceCount'
+    ],
+    timeDimensions: [{
+      dimension: 'visitors.created_at',
+      dateRange: ['2017-01-01', '2017-01-30']
+    }],
+    timezone: 'America/Los_Angeles',
+    order: []
+  }, [{
+    visitors__unique_source_count: '2'
+  }]));
+
+  it('countDistinctApprox SQL uses uniq function', () => {
+    const result = compiler.compile().then(() => {
+      const query = new ClickHouseQuery({ joinGraph, cubeEvaluator, compiler }, {
+        measures: [
+          'visitors.uniqueSourceCount'
+        ],
+        timeDimensions: [{
+          dimension: 'visitors.created_at',
+          dateRange: ['2017-01-01', '2017-01-30']
+        }],
+        timezone: 'America/Los_Angeles',
+        order: []
+      });
+
+      const sql = query.buildSqlAndParams()[0];
+      logSqlAndParams(query);
+
+      expect(sql).toMatch(/uniq\(/);
+    });
+
+    return result;
+  });
+
+  it('hll pre-aggregation rollup', async () => {
+    const hllCompilerResult = prepareJsCompiler(`
+      cube(\`visitors_hll\`, {
+        sql: \`select * from visitors\`,
+
+        measures: {
+          uniqueSourceCount: {
+            type: 'countDistinctApprox',
+            sql: 'source',
+          },
+        },
+
+        dimensions: {
+          id: {
+            type: 'number',
+            sql: 'id',
+            primaryKey: true
+          },
+          created_at: {
+            type: 'time',
+            sql: 'created_at'
+          },
+        },
+
+        preAggregations: {
+          approx: {
+            type: 'rollup',
+            measureReferences: [uniqueSourceCount],
+            timeDimensionReference: created_at,
+            granularity: 'day',
+            indexes: {
+              main: {
+                columns: [created_at]
+              }
+            }
+          }
+        }
+      })
+    `);
+
+    await hllCompilerResult.compiler.compile();
+
+    const query = new ClickHouseQuery(
+      {
+        joinGraph: hllCompilerResult.joinGraph,
+        cubeEvaluator: hllCompilerResult.cubeEvaluator,
+        compiler: hllCompilerResult.compiler,
+      },
+      {
+        measures: ['visitors_hll.uniqueSourceCount'],
+        timeDimensions: [{
+          dimension: 'visitors_hll.created_at',
+          granularity: 'day',
+          dateRange: ['2017-01-01', '2017-01-30']
+        }],
+        timezone: 'America/Los_Angeles',
+        order: [{
+          id: 'visitors_hll.created_at'
+        }],
+        preAggregationsSchema: ''
+      }
+    );
+
+    const preAggregationsDescription: any = query.preAggregations?.preAggregationsDescription()[0];
+    const queryAndParams = query.buildSqlAndParams();
+
+    logSqlAndParams(query);
+    debugLog(preAggregationsDescription);
+
+    // Verify SQL generation uses proper HLL functions
+    expect(preAggregationsDescription.loadSql[0]).toMatch(/uniqState/);
+    expect(queryAndParams[0]).toMatch(/uniqMerge/);
+
+    // Execute against real ClickHouse: adapt load SQL for temp table
+    const testLoadSql = preAggregationsDescription.loadSql[0]
+      .replace('CREATE TABLE', 'CREATE TEMPORARY TABLE')
+      .replace(/ENGINE = MergeTree\(\) ORDER BY \([^)]+\)/, 'ENGINE = Memory');
+
+    const result = await dbRunner.testQueries(
+      [queryAndParams],
+      async (clickHouse) => {
+        // Set up visitors base data
+        await clickHouse.command({
+          query: `
+            CREATE TEMPORARY TABLE visitors (id UInt64, amount UInt64, created_at DateTime, updated_at DateTime, status UInt64, source Nullable(String), latitude Float64, longitude Float64)
+            ENGINE = Memory
+          `
+        });
+        await clickHouse.command({
+          query: `
+            INSERT INTO visitors
+            (id, amount, created_at, updated_at, status, source, latitude, longitude) VALUES
+            (1, 100, '2017-01-02 16:00:00', '2017-01-29 16:00:00', 1, 'some', 120.120, 40.60),
+            (2, 200, '2017-01-04 16:00:00', '2017-01-14 16:00:00', 1, 'some', 120.120, 58.60),
+            (3, 300, '2017-01-05 16:00:00', '2017-01-19 16:00:00', 2, 'google', 120.120, 70.60),
+            (4, 400, '2017-01-06 16:00:00', '2017-01-24 16:00:00', 2, null, 120.120, 10.60),
+            (5, 500, '2017-01-06 16:00:00', '2017-01-24 16:00:00', 2, null, 120.120, 58.10),
+            (6, 500, '2016-09-06 16:00:00', '2016-09-06 16:00:00', 2, null, 120.120, 58.10)
+          `
+        });
+        // Materialize HLL pre-aggregation using uniqState
+        await clickHouse.command({
+          query: formatSql(testLoadSql, preAggregationsDescription.loadSql[1])
+        });
+      }
+    );
+
+    // Query executed with uniqMerge against the pre-agg table
+    const queryResult = result[0];
+    expect(queryResult.length).toBeGreaterThan(0);
+    // Visitors have 2 distinct non-null sources ('some', 'google') across dates
+    const totalApprox = queryResult.reduce(
+      (sum, row: any) => sum + parseInt(row.visitors_hll__unique_source_count || '0', 10), 0
+    );
+    expect(totalApprox).toBeGreaterThan(0);
   });
 
   it('calculated join', () => {

@@ -245,6 +245,18 @@ export class ClickHouseQuery extends BaseQuery {
     return `uniq(${sql})`;
   }
 
+  public hllInit(sql: string): string {
+    return `uniqState(${sql})`;
+  }
+
+  public hllMerge(sql: string): string {
+    return `uniqMerge(${sql})`;
+  }
+
+  public hllCardinality(sql: string): string {
+    return `uniqMerge(${sql})`;
+  }
+
   public createIndexSql(indexName, tableName, escapedColumns) {
     return `ALTER TABLE ${tableName} ADD INDEX ${indexName} (${escapedColumns.join(', ')}) TYPE minmax GRANULARITY 1`;
   }
