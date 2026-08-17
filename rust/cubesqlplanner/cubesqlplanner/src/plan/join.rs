@@ -1,4 +1,4 @@
-use super::{Expr, SingleAliasedSource};
+use super::{Expr, FilterItem, SingleAliasedSource};
 use crate::planner::query_tools::QueryTools;
 use crate::planner::sql_templates::PlanSqlTemplates;
 use crate::planner::{BaseJoinCondition, VisitorContext};
@@ -214,12 +214,45 @@ impl DimensionJoinCondition {
     }
 }
 
+/// A join condition with the row level security filters of the joined cube ANDed onto it. Keeping
+/// those filters out of the outer WHERE is what preserves the LEFT JOIN semantics: applied after
+/// the join they would drop the rows of the cubes on the required side of it as well.
+pub struct FilteredJoinCondition {
+    condition: Box<JoinCondition>,
+    filters: Vec<FilterItem>,
+}
+
+impl FilteredJoinCondition {
+    pub fn new(condition: JoinCondition, filters: Vec<FilterItem>) -> Self {
+        Self {
+            condition: Box::new(condition),
+            filters,
+        }
+    }
+
+    pub fn to_sql(
+        &self,
+        templates: &PlanSqlTemplates,
+        context: Rc<VisitorContext>,
+    ) -> Result<String, CubeError> {
+        let mut conditions = vec![self.condition.to_sql(templates, context.clone())?];
+        for filter in self.filters.iter() {
+            let sql = filter.to_sql(templates, context.clone())?;
+            if !sql.is_empty() {
+                conditions.push(sql);
+            }
+        }
+        Ok(conditions.join(" AND "))
+    }
+}
+
 pub enum JoinCondition {
     DimensionJoinCondition(DimensionJoinCondition),
     BaseJoinCondition(Rc<dyn BaseJoinCondition>),
     RegularRollingWindowJoinCondition(RegularRollingWindowJoinCondition),
     ToDateRollingWindowJoinCondition(ToDateRollingWindowJoinCondition),
     RollingTotalJoinCondition(RollingTotalJoinCondition),
+    FilteredJoinCondition(FilteredJoinCondition),
 }
 
 impl JoinCondition {
@@ -268,6 +301,15 @@ impl JoinCondition {
         Self::BaseJoinCondition(base)
     }
 
+    /// The same condition with `filters` ANDed onto it, or the condition itself when there are none
+    pub fn with_filters(self, filters: Vec<FilterItem>) -> Self {
+        if filters.is_empty() {
+            self
+        } else {
+            Self::FilteredJoinCondition(FilteredJoinCondition::new(self, filters))
+        }
+    }
+
     pub fn to_sql(
         &self,
         templates: &PlanSqlTemplates,
@@ -283,6 +325,7 @@ impl JoinCondition {
                 cond.to_sql(templates, context)
             }
             JoinCondition::RollingTotalJoinCondition(cond) => cond.to_sql(templates, context),
+            JoinCondition::FilteredJoinCondition(cond) => cond.to_sql(templates, context),
         }
     }
 }

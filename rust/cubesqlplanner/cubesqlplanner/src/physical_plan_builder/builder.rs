@@ -115,13 +115,19 @@ impl PhysicalPlanBuilder {
         let mut render_references = HashMap::new();
         let mut measure_references = HashMap::new();
         let mut context_factory = context.make_sql_nodes_factory();
-        let from = match &logical_plan.source {
-            SimpleQuerySource::LogicalJoin(join) => self.process_logical_join(
-                &join,
-                context,
-                &logical_plan.dimension_subqueries,
-                &mut render_references,
-            )?,
+        let (filter, from) = match &logical_plan.source {
+            SimpleQuerySource::LogicalJoin(join) => {
+                let (filter, row_level_security_filters) =
+                    Self::split_row_level_security_filters(&logical_plan.filter, join);
+                let from = self.process_logical_join(
+                    &join,
+                    context,
+                    &logical_plan.dimension_subqueries,
+                    &mut render_references,
+                    &row_level_security_filters,
+                )?;
+                (filter, from)
+            }
             SimpleQuerySource::PreAggregation(pre_aggregation) => {
                 let res = self.process_pre_aggregation(
                     pre_aggregation,
@@ -133,7 +139,9 @@ impl PhysicalPlanBuilder {
                     context_factory.add_dimensions_with_ignored_timezone(member.full_name());
                 }
                 context_factory.set_use_local_tz_in_date_range(true);
-                res
+                // A query reading from a pre-aggregation has no join to move row level security
+                // filters to, so they keep being rendered in the WHERE
+                (logical_plan.filter.clone(), res)
             }
         };
 
@@ -165,7 +173,7 @@ impl PhysicalPlanBuilder {
             );
         }
 
-        let filter = logical_plan.filter.all_filters();
+        let where_filter = filter.all_filters();
         let having = if logical_plan.filter.measures_filter.is_empty() {
             None
         } else {
@@ -174,7 +182,7 @@ impl PhysicalPlanBuilder {
             })
         };
 
-        select_builder.set_filter(filter);
+        select_builder.set_filter(where_filter);
         select_builder.set_group_by(group_by);
         select_builder
             .set_order_by(self.make_order_by(&logical_plan.schema, &logical_plan.order_by)?);
@@ -534,12 +542,19 @@ impl PhysicalPlanBuilder {
         Ok(joins)
     }
 
+    /// Row level security filters restrict the rows of the cube their policy is defined on, and
+    /// only that cube. Rendered in the outer WHERE - i.e. after the joins - they would also drop
+    /// the rows of the cubes on the required side of a join whenever the joined cube has no row
+    /// passing the policy, silently turning the LEFT JOIN into an INNER JOIN. So the ones scoped to
+    /// a single joined cube are moved into the condition of the join bringing that cube in, and
+    /// left out of the WHERE by `split_row_level_security_filters`.
     fn process_logical_join(
         &self,
         logical_join: &LogicalJoin,
         context: &PhysicalPlanBuilderContext,
         dimension_subqueries: &Vec<Rc<DimensionSubQuery>>,
         render_references: &mut HashMap<String, QualifiedColumnName>,
+        row_level_security_filters: &HashMap<String, Vec<FilterItem>>,
     ) -> Result<Rc<From>, CubeError> {
         let root = logical_join.root.cube.clone();
         if logical_join.joins.is_empty() && dimension_subqueries.is_empty() {
@@ -566,13 +581,20 @@ impl PhysicalPlanBuilder {
             for join in logical_join.joins.iter() {
                 match join {
                     LogicalJoinItem::CubeJoinItem(CubeJoinItem { cube, on_sql }) => {
+                        let on = JoinCondition::new_base_join(SqlJoinCondition::try_new(
+                            self.query_tools.clone(),
+                            on_sql.clone(),
+                        )?)
+                        .with_filters(
+                            row_level_security_filters
+                                .get(&cube.name)
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
                         join_builder.left_join_cube(
                             cube.cube.clone(),
                             Some(cube.cube.default_alias_with_prefix(&context.alias_prefix)),
-                            JoinCondition::new_base_join(SqlJoinCondition::try_new(
-                                self.query_tools.clone(),
-                                on_sql.clone(),
-                            )?),
+                            on,
                         );
                         for dimension_subquery in dimension_subqueries
                             .iter()
@@ -590,6 +612,51 @@ impl PhysicalPlanBuilder {
             }
             Ok(From::new_from_join(join_builder.build()))
         }
+    }
+
+    /// Splits the dimension filters of `filter` into the ones to render in the WHERE and the row
+    /// level security ones that can be rendered in a join condition of `logical_join` instead,
+    /// grouped by the cube they are scoped to. A filter is only left out of the WHERE when it ends
+    /// up in a join condition, so the ones scoped to the join root or spanning several cubes keep
+    /// being applied as before.
+    fn split_row_level_security_filters(
+        filter: &Rc<LogicalFilter>,
+        logical_join: &LogicalJoin,
+    ) -> (Rc<LogicalFilter>, HashMap<String, Vec<FilterItem>>) {
+        let joined_cubes = logical_join
+            .joins
+            .iter()
+            .map(|join| match join {
+                LogicalJoinItem::CubeJoinItem(item) => item.cube.name.clone(),
+            })
+            .collect::<HashSet<_>>();
+
+        let mut where_filters = Vec::new();
+        let mut join_filters: HashMap<String, Vec<FilterItem>> = HashMap::new();
+        for item in filter.dimensions_filters.iter() {
+            match item
+                .row_level_security_cube()
+                .filter(|cube_name| joined_cubes.contains(cube_name))
+            {
+                Some(cube_name) => join_filters
+                    .entry(cube_name)
+                    .or_default()
+                    .push(item.clone()),
+                None => where_filters.push(item.clone()),
+            }
+        }
+
+        if join_filters.is_empty() {
+            return (filter.clone(), join_filters);
+        }
+
+        let reduced_filter = Rc::new(LogicalFilter {
+            dimensions_filters: where_filters,
+            time_dimensions_filters: filter.time_dimensions_filters.clone(),
+            measures_filter: filter.measures_filter.clone(),
+            segments: filter.segments.clone(),
+        });
+        (reduced_filter, join_filters)
     }
 
     fn add_subquery_join(
@@ -789,11 +856,14 @@ impl PhysicalPlanBuilder {
         context: &PhysicalPlanBuilderContext,
     ) -> Result<Rc<Select>, CubeError> {
         let mut render_references = HashMap::new();
+        // The measures are restricted through the primary keys of the keys subquery, which does
+        // apply the row level security filters
         let from = self.process_logical_join(
             &measure_subquery.source,
             context,
             &measure_subquery.dimension_subqueries,
             &mut render_references,
+            &HashMap::new(),
         )?;
         let mut context_factory = context.make_sql_nodes_factory();
         let mut select_builder = SelectBuilder::new(from);
@@ -837,11 +907,14 @@ impl PhysicalPlanBuilder {
 
         let mut context = context.clone();
         context.alias_prefix = alias_prefix;
+        let (filter, row_level_security_filters) =
+            Self::split_row_level_security_filters(&keys_subquery.filter, &keys_subquery.source);
         let source = self.process_logical_join(
             &keys_subquery.source,
             &context,
             &keys_subquery.dimension_subqueries,
             &mut render_references,
+            &row_level_security_filters,
         )?;
         let mut select_builder = SelectBuilder::new(source);
         for member in keys_subquery
@@ -857,7 +930,7 @@ impl PhysicalPlanBuilder {
         }
 
         select_builder.set_distinct();
-        select_builder.set_filter(keys_subquery.filter.all_filters());
+        select_builder.set_filter(filter.all_filters());
         let mut context_factory = context.make_sql_nodes_factory();
         context_factory.set_render_references(render_references);
         let res = Rc::new(select_builder.build(context_factory));
@@ -942,6 +1015,7 @@ impl PhysicalPlanBuilder {
             context,
             &get_date_range.dimension_subqueries,
             &mut render_references,
+            &HashMap::new(),
         )?;
         let mut select_builder = SelectBuilder::new(from);
         let mut context_factory = context.make_sql_nodes_factory();

@@ -409,6 +409,7 @@ impl SqlCall {
                     dimension: None,
                     operator: None,
                     values: None,
+                    row_level_security: Some(group.row_level_security),
                 })
             }
             FilterItem::Item(filter) => {
@@ -422,6 +423,7 @@ impl SqlCall {
                         dimension: None,
                         operator: Some(filter.filter_operator().to_string()),
                         values: Some(filter.values().clone()),
+                        row_level_security: Some(filter.row_level_security()),
                     })
                 }
             }

@@ -27,6 +27,11 @@ pub struct FilterItem {
     pub dimension: Option<String>,
     pub operator: Option<String>,
     pub values: Option<Vec<Option<String>>>,
+    /// Set for the filters CompilerApi#applyRowLevelSecurity derives from access policies. Such a
+    /// filter restricts the rows of the cube its policy is defined on, so it's applied in the
+    /// condition of the join bringing that cube in rather than in the outer WHERE.
+    #[serde(rename = "rowLevelSecurity")]
+    pub row_level_security: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

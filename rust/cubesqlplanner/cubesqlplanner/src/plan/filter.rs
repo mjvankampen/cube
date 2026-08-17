@@ -16,6 +16,9 @@ pub enum FilterGroupOperator {
 pub struct FilterGroup {
     pub operator: FilterGroupOperator,
     pub items: Vec<FilterItem>,
+    /// Set for filters derived from an access policy's `row_level.filters`.
+    /// @see FilterItem::row_level_security_cube
+    pub row_level_security: bool,
 }
 
 impl PartialEq for FilterGroup {
@@ -26,7 +29,28 @@ impl PartialEq for FilterGroup {
 
 impl FilterGroup {
     pub fn new(operator: FilterGroupOperator, items: Vec<FilterItem>) -> Self {
-        Self { operator, items }
+        Self {
+            operator,
+            items,
+            row_level_security: false,
+        }
+    }
+
+    pub fn new_row_level_security(operator: FilterGroupOperator, items: Vec<FilterItem>) -> Self {
+        Self {
+            operator,
+            items,
+            row_level_security: true,
+        }
+    }
+
+    /// The same group with its items replaced, keeping the operator and the row level security flag
+    pub fn with_items(&self, items: Vec<FilterItem>) -> Self {
+        Self {
+            operator: self.operator.clone(),
+            items,
+            row_level_security: self.row_level_security,
+        }
     }
 }
 
@@ -85,6 +109,42 @@ impl FilterItem {
             }
         };
         Ok(res)
+    }
+
+    pub fn is_row_level_security(&self) -> bool {
+        match self {
+            FilterItem::Group(group) => group.row_level_security,
+            FilterItem::Item(item) => item.row_level_security(),
+            FilterItem::Segment(_) => false,
+        }
+    }
+
+    /// Returns the cube a row level security filter is scoped to, or `None` if the filter isn't a
+    /// row level security one, spans more than one cube, or can't be attributed to a cube at all.
+    /// Only such a single cube filter can be moved from the outer WHERE into the condition of the
+    /// join bringing that cube in.
+    pub fn row_level_security_cube(&self) -> Option<String> {
+        if !self.is_row_level_security() {
+            return None;
+        }
+        let mut result: Option<String> = None;
+        for symbol in self.all_member_evaluators() {
+            let cube_name = match symbol.as_ref() {
+                // Member expressions may reference several cubes, and a subQuery dimension renders
+                // as a reference to a join that comes after the one we'd be adding the condition
+                // to. Both keep being applied in the outer WHERE.
+                MemberSymbol::Dimension(dimension) if !dimension.is_sub_query() => {
+                    dimension.cube_name().clone()
+                }
+                _ => return None,
+            };
+            match &result {
+                None => result = Some(cube_name),
+                Some(found) if found == &cube_name => {}
+                Some(_) => return None,
+            }
+        }
+        result
     }
 
     pub fn all_member_evaluators(&self) -> Vec<Rc<MemberSymbol>> {

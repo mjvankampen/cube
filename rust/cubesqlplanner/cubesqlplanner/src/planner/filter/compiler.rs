@@ -48,6 +48,7 @@ impl<'a> FilterCompiler<'a> {
                 FilterType::Dimension,
                 FilterOperator::InDateRange,
                 Some(date_range.into_iter().map(|v| Some(v)).collect()),
+                false,
             )?;
             self.time_dimension_filters.push(FilterItem::Item(filter));
         }
@@ -80,7 +81,12 @@ impl<'a> FilterCompiler<'a> {
                 .iter()
                 .map(|itm| self.compile_item(itm, item_type))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(FilterItem::Group(Rc::new(FilterGroup::new(op, items))))
+            let group = if item.row_level_security.unwrap_or(false) {
+                FilterGroup::new_row_level_security(op, items)
+            } else {
+                FilterGroup::new(op, items)
+            };
+            Ok(FilterItem::Group(Rc::new(group)))
         } else {
             if let (Some(member), Some(operator)) = (item.member(), &item.operator) {
                 let member_path = member.split(".").map(|m| m.to_string()).collect::<Vec<_>>();
@@ -97,6 +103,7 @@ impl<'a> FilterCompiler<'a> {
                     item_type.clone(),
                     FilterOperator::from_str(&operator)?,
                     item.values.clone(),
+                    item.row_level_security.unwrap_or(false),
                 )?))
             } else {
                 Err(CubeError::user(format!(

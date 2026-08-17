@@ -27,6 +27,9 @@ pub struct BaseFilter {
     values: Vec<Option<String>>,
     use_raw_values: bool,
     templates: FilterTemplates,
+    /// Set for filters derived from an access policy's `row_level.filters`.
+    /// @see FilterItem::row_level_security_cube
+    row_level_security: bool,
 }
 
 impl PartialEq for BaseFilter {
@@ -44,6 +47,7 @@ impl BaseFilter {
         filter_type: FilterType,
         filter_operator: FilterOperator,
         values: Option<Vec<Option<String>>>,
+        row_level_security: bool,
     ) -> Result<Rc<Self>, CubeError> {
         let templates = FilterTemplates::new(query_tools.templates_render());
         let values = if let Some(values) = values {
@@ -59,6 +63,7 @@ impl BaseFilter {
             values,
             templates,
             use_raw_values: false,
+            row_level_security,
         }))
     }
 
@@ -76,6 +81,7 @@ impl BaseFilter {
             values,
             templates: self.templates.clone(),
             use_raw_values,
+            row_level_security: self.row_level_security,
         })
     }
 
@@ -106,6 +112,10 @@ impl BaseFilter {
 
     pub fn use_raw_values(&self) -> bool {
         self.use_raw_values
+    }
+
+    pub fn row_level_security(&self) -> bool {
+        self.row_level_security
     }
 
     pub fn member_name(&self) -> String {

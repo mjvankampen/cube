@@ -1,4 +1,4 @@
-use crate::plan::{FilterGroup, FilterItem};
+use crate::plan::FilterItem;
 use crate::planner::filter::FilterOperator;
 use crate::planner::sql_evaluator::{MeasureTimeShift, MemberSymbol};
 use crate::planner::{BaseDimension, BaseMember, BaseTimeDimension};
@@ -139,8 +139,7 @@ impl MultiStageAppliedState {
         for item in filters.iter() {
             match item {
                 FilterItem::Group(group) => {
-                    let new_group = FilterItem::Group(Rc::new(FilterGroup::new(
-                        group.operator.clone(),
+                    let new_group = FilterItem::Group(Rc::new(group.with_items(
                         self.extract_filters_exclude_member(member_name, &group.items),
                     )));
                     result.push(new_group);
@@ -265,8 +264,7 @@ impl MultiStageAppliedState {
         for item in filters.iter() {
             match item {
                 FilterItem::Group(group) => {
-                    let new_group = FilterItem::Group(Rc::new(FilterGroup::new(
-                        group.operator.clone(),
+                    let new_group = FilterItem::Group(Rc::new(group.with_items(
                         self.change_date_range_filter_impl(
                             member_name,
                             filters,

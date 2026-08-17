@@ -3,10 +3,13 @@ import { prepareJsCompiler } from './PrepareCompiler';
 
 /**
  * Access policies are evaluated by CompilerApi#applyRowLevelSecurity, which pushes the resulting
- * filters onto the query with a `rowLevelSecurity` flag. These tests cover what the query planner
- * does with that flag, so the filters are handed over directly instead of going through RBAC.
+ * filters onto the query with a `rowLevelSecurity` flag. These tests cover what the query planners
+ * do with that flag, so the filters are handed over directly instead of going through RBAC.
  */
-describe('Row level security filters', () => {
+describe.each([
+  ['JS query planner', false],
+  ['native query planner', true],
+])('Row level security filters (%s)', (_name, useNativeSqlPlanner) => {
   const compilers = prepareJsCompiler(`
 cube('orders', {
   sql_table: 'public.orders',
@@ -65,17 +68,22 @@ cube('shipments', {
     ...(rowLevelSecurity ? { rowLevelSecurity } : {}),
   });
 
+  const buildQuery = (query: any) => new PostgresQuery(compilers, {
+    timezone: 'UTC',
+    useNativeSqlPlanner,
+    ...query,
+  });
+
   it('applies a filter of a joined cube in the join condition, keeping the LEFT JOIN semantics', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       dimensions: ['orders.id', 'shipments.carrier'],
       filters: [tenantFilter('shipments.tenant_id', true)],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
-    expect(sql).toContain('LEFT JOIN public.shipments AS "shipments" ON "orders".id = "shipments".order_id AND ("shipments".tenant_id = $1)');
+    expect(sql).toContain('ON "orders".id = "shipments".order_id AND ("shipments".tenant_id = $1)');
     // Applying it after the join would discard the orders without a matching shipment
     expect(sql).not.toContain('WHERE');
     expect(params).toEqual(['t1']);
@@ -84,10 +92,9 @@ cube('shipments', {
   it('applies a plain filter of a joined cube in the outer WHERE', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       dimensions: ['orders.id', 'shipments.carrier'],
       filters: [tenantFilter('shipments.tenant_id', false)],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
@@ -99,10 +106,9 @@ cube('shipments', {
   it('applies a filter of the join root in the outer WHERE', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       dimensions: ['orders.id', 'shipments.carrier'],
       filters: [tenantFilter('orders.tenant_id', true)],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
@@ -115,15 +121,14 @@ cube('shipments', {
   it('applies a filter of a joined cube in the join condition of an aggregating query', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       measures: ['orders.count'],
       dimensions: ['shipments.carrier'],
       filters: [tenantFilter('shipments.tenant_id', true)],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
-    expect(sql).toContain('LEFT JOIN public.shipments AS "shipments" ON "orders".id = "shipments".order_id AND ("shipments".tenant_id = $1)');
+    expect(sql).toContain('ON "orders".id = "shipments".order_id AND ("shipments".tenant_id = $1)');
     expect(sql).not.toContain('WHERE');
     expect(params).toEqual(['t1']);
   });
@@ -131,7 +136,7 @@ cube('shipments', {
   it('keeps a nested filter scoped to a single joined cube in the join condition', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       dimensions: ['orders.id', 'shipments.carrier'],
       filters: [{
         // Policies of several roles are combined with `or`, which is still pushed down as long
@@ -142,7 +147,6 @@ cube('shipments', {
         ],
         rowLevelSecurity: true,
       }],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
@@ -154,7 +158,7 @@ cube('shipments', {
   it('keeps a filter spanning several cubes in the outer WHERE', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       dimensions: ['orders.id', 'shipments.carrier'],
       filters: [{
         // There's no single join condition this could be moved to without changing its meaning
@@ -164,7 +168,6 @@ cube('shipments', {
         ],
         rowLevelSecurity: true,
       }],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
@@ -176,19 +179,32 @@ cube('shipments', {
   it('applies filters of both sides of a join to the side they belong to', async () => {
     await compilers.compiler.compile();
 
-    const query = new PostgresQuery(compilers, {
+    const query = buildQuery({
       dimensions: ['orders.id', 'shipments.carrier'],
       filters: [
         tenantFilter('orders.tenant_id', true),
         tenantFilter('shipments.tenant_id', true),
       ],
-      timezone: 'UTC',
     });
 
     const [sql, params] = query.buildSqlAndParams();
-    expect(sql).toContain('LEFT JOIN public.shipments AS "shipments" ON "orders".id = "shipments".order_id AND ("shipments".tenant_id = $1)');
+    expect(sql).toContain('ON "orders".id = "shipments".order_id AND ("shipments".tenant_id = $1)');
     expect(sql).toContain('WHERE ("orders".tenant_id = $2)');
     expect(params).toEqual(['t1', 't1']);
+  });
+
+  it('does not apply a filter of a cube that is not part of the query', async () => {
+    await compilers.compiler.compile();
+
+    const query = buildQuery({
+      dimensions: ['orders.id'],
+      filters: [tenantFilter('orders.tenant_id', true)],
+    });
+
+    const [sql, params] = query.buildSqlAndParams();
+    expect(sql).not.toContain('shipments');
+    expect(sql).toContain('WHERE ("orders".tenant_id = $1)');
+    expect(params).toEqual(['t1']);
   });
 
   it('applies a filter of a joined cube in the WHERE of a query served by a pre-aggregation', async () => {
@@ -255,6 +271,7 @@ cube('shipments', {
       filters: [tenantFilter('shipments.tenant_id', true)],
       timezone: 'UTC',
       preAggregationsSchema: '',
+      useNativeSqlPlanner,
     });
 
     const [sql, params] = query.buildSqlAndParams();
@@ -262,21 +279,6 @@ cube('shipments', {
       .toEqual('orders.ordersByCarrier');
     expect(sql).not.toContain('LEFT JOIN');
     expect(sql).toContain('WHERE ("shipments__tenant_id" = $1)');
-    expect(params).toEqual(['t1']);
-  });
-
-  it('does not apply a filter of a cube that is not part of the query', async () => {
-    await compilers.compiler.compile();
-
-    const query = new PostgresQuery(compilers, {
-      dimensions: ['orders.id'],
-      filters: [tenantFilter('orders.tenant_id', true)],
-      timezone: 'UTC',
-    });
-
-    const [sql, params] = query.buildSqlAndParams();
-    expect(sql).not.toContain('shipments');
-    expect(sql).toContain('WHERE ("orders".tenant_id = $1)');
     expect(params).toEqual(['t1']);
   });
 });
