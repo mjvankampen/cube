@@ -59,9 +59,13 @@ export class HiveQuery extends BaseQuery {
   }
 
   public simpleQuery() {
+    const pushedDownRowLevelSecurityFilters = [];
     const ungrouped = this.evaluateSymbolSqlWithContext(
-      () => `${this.commonQuery()} ${this.baseWhere(this.allFilters)}`, {
-        ungroupedForWrappingGroupBy: true
+      // `commonQuery` renders the joins, and so fills in pushedDownRowLevelSecurityFilters,
+      // before `baseWhere` is reached
+      () => `${this.commonQuery()} ${this.baseWhere(this.withoutPushedDownFilters(this.allFilters, pushedDownRowLevelSecurityFilters))}`, {
+        ungroupedForWrappingGroupBy: true,
+        pushedDownRowLevelSecurityFilters,
       }
     );
     const select = this.evaluateSymbolSqlWithContext(

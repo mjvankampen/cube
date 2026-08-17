@@ -145,12 +145,16 @@ const oneFilter = Joi.object().keys({
   dimension: id,
   member: id,
   operator: Joi.valid(...operators).required(),
-  values: Joi.array().items(Joi.string().allow('', null), Joi.number(), Joi.boolean(), Joi.link('...'))
+  values: Joi.array().items(Joi.string().allow('', null), Joi.number(), Joi.boolean(), Joi.link('...')),
+  // Internal flag, see stripRowLevelSecurityFlags below
+  rowLevelSecurity: Joi.boolean().strict(),
 }).xor('dimension', 'member');
 
 const oneCondition = Joi.object().keys({
   or: Joi.array().items(oneFilter, Joi.link('...').description('oneCondition schema')),
   and: Joi.array().items(oneFilter, Joi.link('...').description('oneCondition schema')),
+  // Internal flag, see stripRowLevelSecurityFlags below
+  rowLevelSecurity: Joi.boolean().strict(),
 }).xor('or', 'and');
 
 const subqueryJoin = Joi.object().keys({
@@ -236,6 +240,31 @@ export const preAggsJobsRequestSchema = Joi.object({
 });
 
 const DateRegex = /^\d\d\d\d-\d\d-\d\d$/;
+
+/**
+ * `rowLevelSecurity` marks the filters that CompilerApi#applyRowLevelSecurity derives from
+ * access policies, so that the query planner can keep them from collapsing LEFT JOINs. The
+ * query is re-validated after the policies have been applied, hence the flag has to be part
+ * of the filter schema - strip it off whatever comes from the outside so that it stays internal.
+ * @param {Array<any>} [filters]
+ * @returns {Array<any>}
+ */
+const stripRowLevelSecurityFlags = (filters) => (
+  (filters || []).map(f => {
+    if (!f || typeof f !== 'object') {
+      return f;
+    }
+    const res = { ...f };
+    delete res.rowLevelSecurity;
+    if (f.or) {
+      res.or = stripRowLevelSecurityFlags(f.or);
+    }
+    if (f.and) {
+      res.and = stripRowLevelSecurityFlags(f.and);
+    }
+    return res;
+  })
+);
 
 const normalizeQueryFilters = (filter) => (
   filter.map(f => {
@@ -459,4 +488,5 @@ export {
   normalizeQueryCancelPreAggregations,
   parseInputMemberExpression,
   remapToQueryAdapterFormat,
+  stripRowLevelSecurityFlags,
 };

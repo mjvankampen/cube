@@ -141,10 +141,23 @@ describe('Cube RBAC Engine', () => {
     });
 
     test('SELECT * from line_items_view_joined_orders', async () => {
-      const res = await connection.query('SELECT * FROM line_items_view_joined_orders limit 10');
-      // Querying the line_items cube with joined orders should take into account
-      // orders row level policy and return only a few rows with select ids
-      expect(res.rows).toMatchSnapshot('orders_view');
+      const joined = await connection.query(
+        'SELECT id, orders_id FROM line_items_view_joined_orders ORDER BY id ASC limit 10'
+      );
+      const lineItems = await connection.query(
+        'SELECT id FROM line_items_view_no_policy ORDER BY id ASC limit 10'
+      );
+      // orders is on the optional side of the join here, so its row level policy decides which
+      // orders are visible - it must not decide which line items are returned. Line items
+      // joined to an order hidden by the policy come back with the orders_* fields nulled out
+      // instead of disappearing along with the order.
+      expect(joined.rows.map((r) => r.id)).toEqual(lineItems.rows.map((r) => r.id));
+      const visibleOrderIds = joined.rows
+        .filter((r) => r.orders_id !== null)
+        .map((r) => r.orders_id);
+      // The admin context sees orders 1, 10 and 11 only
+      expect(visibleOrderIds.filter((id) => ![1, 10, 11].includes(id))).toEqual([]);
+      expect(visibleOrderIds.length).toBeLessThan(joined.rows.length);
     });
 
     test('SELECT * from users', async () => {

@@ -370,6 +370,22 @@ describe('index.test', () => {
       expect(metaConfigExtendedSpy).toHaveBeenCalled();
       metaConfigExtendedSpy.mockClear();
     });
+
+    // Query filters are conjunctive, so splitting the top level `and` doesn't change the meaning
+    // of an rls filter. It does let the query planner decide for each conjunct on its own whether
+    // it can be applied in a join condition instead of the outer WHERE.
+    test('CompilerApi flattenRlsFilter', () => {
+      const tenantFilter = { member: 'shipments.tenant_id', operator: 'equals', values: ['t1'] };
+      const orderFilter = { member: 'orders.tenant_id', operator: 'equals', values: ['t1'] };
+
+      expect(compilerApi.flattenRlsFilter(null)).toEqual([]);
+      expect(compilerApi.flattenRlsFilter(tenantFilter)).toEqual([tenantFilter]);
+      expect(compilerApi.flattenRlsFilter({ or: [tenantFilter, orderFilter] }))
+        .toEqual([{ or: [tenantFilter, orderFilter] }]);
+      expect(compilerApi.flattenRlsFilter({
+        and: [{ and: [tenantFilter, orderFilter] }, { or: [tenantFilter] }],
+      })).toEqual([tenantFilter, orderFilter, { or: [tenantFilter] }]);
+    });
   });
 
   describe('CompilerApi with empty cube on input', () => {

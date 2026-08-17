@@ -87,6 +87,7 @@ import {
   parseInputMemberExpression,
   preAggsJobsRequestSchema,
   remapToQueryAdapterFormat,
+  stripRowLevelSecurityFlags,
 } from './query';
 import { cachedHandler } from './cached-handler';
 import { createJWKsFetcher } from './jwk';
@@ -1233,6 +1234,11 @@ class ApiGateway {
         }
 
         currentQuery = this.parseMemberExpressionsInQuery(currentQuery);
+      }
+
+      if (currentQuery.filters) {
+        // `rowLevelSecurity` is set by applyRowLevelSecurity below and must not be forgeable
+        currentQuery = { ...currentQuery, filters: stripRowLevelSecurityFlags(currentQuery.filters) };
       }
 
       return {

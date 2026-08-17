@@ -359,11 +359,32 @@ export class CompilerApi {
       viewFiltersPerCubePerRole,
       hasAllowAllForCube
     );
-    if (rlsFilter) {
+    const rlsFilters = this.flattenRlsFilter(rlsFilter);
+    if (rlsFilters.length) {
       query.filters = query.filters || [];
-      query.filters.push(rlsFilter);
+      // The `rowLevelSecurity` flag lets the query planner tell these filters apart from the
+      // user supplied ones: a policy on a cube must restrict the rows of that cube only, so a
+      // filter scoped to a joined cube goes into the join condition instead of the outer WHERE.
+      query.filters.push(...rlsFilters.map(filter => ({ ...filter, rowLevelSecurity: true })));
     }
     return { query, denied: false };
+  }
+
+  /**
+   * Splits the top level `and` of an rls filter into standalone filters. Filters of a query are
+   * conjunctive, so this doesn't change the meaning of the filter, but it lets each conjunct be
+   * considered for join condition pushdown on its own.
+   * @param {unknown} filter
+   * @returns {Array<unknown>}
+   */
+  flattenRlsFilter(filter) {
+    if (!filter) {
+      return [];
+    }
+    if (filter.and) {
+      return filter.and.flatMap(f => this.flattenRlsFilter(f));
+    }
+    return [filter];
   }
 
   removeEmptyFilters(filter) {

@@ -205,6 +205,7 @@ export class BaseQuery {
             operator,
             dimensionGroup: true,
             measure: null,
+            rowLevelSecurity: f.rowLevelSecurity,
           };
         }
         if (!dimension.length && measure.length) {
@@ -1038,11 +1039,13 @@ export class BaseQuery {
   simpleQuery() {
     // eslint-disable-next-line prefer-template
     const inlineWhereConditions = [];
-    const commonQuery = this.rewriteInlineWhere(() => this.commonQuery(), inlineWhereConditions);
+    const pushedDownRowLevelSecurityFilters = [];
+    const commonQuery = this.rewriteInlineWhere(() => this.commonQuery(), inlineWhereConditions, pushedDownRowLevelSecurityFilters);
+    const filters = this.withoutPushedDownFilters(this.allFilters, pushedDownRowLevelSecurityFilters);
     if (this.multiStageQuery) {
-      return `${commonQuery} ${this.baseWhere(this.allFilters.concat(inlineWhereConditions))}`;
+      return `${commonQuery} ${this.baseWhere(filters.concat(inlineWhereConditions))}`;
     }
-    return `${commonQuery} ${this.baseWhere(this.allFilters.concat(inlineWhereConditions))}` +
+    return `${commonQuery} ${this.baseWhere(filters.concat(inlineWhereConditions))}` +
       this.groupByClause() +
       this.baseHaving(this.measureFilters) +
       this.orderBy() +
@@ -2033,10 +2036,12 @@ export class BaseQuery {
     const joins = join.joins.map(
       j => {
         const [cubeSql, cubeAlias, conditions] = this.rewriteInlineCubeSql(j.originalTo, true);
+        const rowLevelSecurityConditions = this.rowLevelSecurityJoinConditions(j.originalTo);
         return [{
           sql: cubeSql,
           alias: cubeAlias,
-          on: `${this.evaluateSql(j.originalFrom, j.join.sql)}${conditions ? ` AND (${conditions})` : ''}`
+          on: `${this.evaluateSql(j.originalFrom, j.join.sql)}${conditions ? ` AND (${conditions})` : ''}${
+            rowLevelSecurityConditions.map(c => ` AND (${c})`).join('')}`
           // TODO handle the case when sub query referenced by a foreign cube on other side of a join
         }].concat((subQueryDimensionsByCube[j.originalTo] || []).map(d => this.subQueryJoin(d)));
       }
@@ -2050,6 +2055,68 @@ export class BaseQuery {
       ...joins,
       ...this.customSubQueryJoins.map((customJoin) => this.customSubQueryJoin(customJoin)),
     ]);
+  }
+
+  /**
+   * Returns the cube a row level security filter is scoped to, or `null` if the filter isn't a
+   * row level security one, spans more than one cube, or can't be attributed to a cube at all.
+   * @param {BaseFilter|BaseGroupFilter|BaseSegment|BaseTimeDimension} filter
+   * @returns {string|null}
+   */
+  rowLevelSecurityFilterCube(filter) {
+    if (!filter.rowLevelSecurity) {
+      return null;
+    }
+    const cubeNames = R.uniq(R.flatten([filter.getMembers()]).map(m => {
+      // Member expressions carry their own cube name but may reference several cubes, and
+      // subQuery dimensions render as a reference to a join that comes after the one we'd be
+      // adding the condition to. Both are left alone and keep being applied in the outer WHERE.
+      if (!m.dimension || m.expression ||
+        !this.cubeEvaluator.isDimension(m.dimension) ||
+        this.cubeEvaluator.dimensionByPath(m.dimension).subQuery
+      ) {
+        return null;
+      }
+      return this.cubeEvaluator.cubeNameFromPath(m.dimension);
+    }));
+    return cubeNames.length === 1 ? cubeNames[0] : null;
+  }
+
+  /**
+   * Renders the row level security filters scoped to `cubeName` so that they can be added to the
+   * condition of the LEFT JOIN bringing that cube in. Applying them in the outer WHERE instead
+   * would drop the rows of the cubes on the required side of the join whenever the joined cube
+   * has no row passing the policy, silently turning the LEFT JOIN into an INNER JOIN.
+   *
+   * Filters rendered here are reported to `pushedDownRowLevelSecurityFilters` of the current
+   * evaluation context, if any, so that the caller can leave them out of the WHERE it builds.
+   * Without a collector in context the filters are just applied in both places, which is
+   * redundant but never less restrictive.
+   * @param {string} cubeName
+   * @returns {Array<string>}
+   */
+  rowLevelSecurityJoinConditions(cubeName) {
+    const pushedDownFilters = this.safeEvaluateSymbolContext().pushedDownRowLevelSecurityFilters;
+    return this.filters
+      .filter(f => this.rowLevelSecurityFilterCube(f) === cubeName)
+      .map(f => {
+        const sql = f.filterToWhere();
+        if (sql && pushedDownFilters) {
+          pushedDownFilters.push(f);
+        }
+        return sql;
+      })
+      .filter(R.identity);
+  }
+
+  /**
+   * Drops the filters that have already been rendered into a join condition by `joinQuery`.
+   */
+  withoutPushedDownFilters(filters, pushedDownRowLevelSecurityFilters) {
+    if (!pushedDownRowLevelSecurityFilters.length) {
+      return filters;
+    }
+    return filters.filter(f => !pushedDownRowLevelSecurityFilters.includes(f));
   }
 
   joinSql(toJoin) {
@@ -2165,6 +2232,7 @@ export class BaseQuery {
     filters = filters || this.allFilters;
 
     const inlineWhereConditions = [];
+    const pushedDownRowLevelSecurityFilters = [];
 
     const query = this.rewriteInlineWhere(() => this.joinQuery(
       this.join,
@@ -2173,10 +2241,10 @@ export class BaseQuery {
         this.collectSubQueryDimensionsFor.bind(this),
         'collectSubQueryDimensionsFor'
       )
-    ), inlineWhereConditions);
+    ), inlineWhereConditions, pushedDownRowLevelSecurityFilters);
 
     return `SELECT ${this.selectAllDimensionsAndMeasures(measures)} FROM ${query
-    } ${this.baseWhere(filters.concat(inlineWhereConditions))}` +
+    } ${this.baseWhere(this.withoutPushedDownFilters(filters, pushedDownRowLevelSecurityFilters).concat(inlineWhereConditions))}` +
       (!this.safeEvaluateSymbolContext().ungrouped && this.groupByClause() || '');
   }
 
@@ -2326,6 +2394,7 @@ export class BaseQuery {
 
   keysQuery(primaryKeyDimensions, filters) {
     const inlineWhereConditions = [];
+    const pushedDownRowLevelSecurityFilters = [];
     const query = this.rewriteInlineWhere(() => this.joinQuery(
       this.join,
       this.collectFrom(
@@ -2333,9 +2402,9 @@ export class BaseQuery {
         this.collectSubQueryDimensionsFor.bind(this),
         'collectSubQueryDimensionsFor'
       )
-    ), inlineWhereConditions);
+    ), inlineWhereConditions, pushedDownRowLevelSecurityFilters);
     return `SELECT DISTINCT ${this.keysSelect(primaryKeyDimensions)} FROM ${query
-    } ${this.baseWhere(filters.concat(inlineWhereConditions))}`;
+    } ${this.baseWhere(this.withoutPushedDownFilters(filters, pushedDownRowLevelSecurityFilters).concat(inlineWhereConditions))}`;
   }
 
   keysSelect(primaryKeyDimensions) {
@@ -2510,8 +2579,8 @@ export class BaseQuery {
     return R.uniq(context.subQueryDimensions);
   }
 
-  rewriteInlineWhere(fn, inlineWhereConditions) {
-    const context = { inlineWhereConditions };
+  rewriteInlineWhere(fn, inlineWhereConditions, pushedDownRowLevelSecurityFilters = []) {
+    const context = { inlineWhereConditions, pushedDownRowLevelSecurityFilters };
     return this.evaluateSymbolSqlWithContext(
       fn,
       context

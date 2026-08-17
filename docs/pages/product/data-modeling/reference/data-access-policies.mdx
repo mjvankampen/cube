@@ -340,9 +340,22 @@ Note that access policies also respect [row-level security][ref-rls] restriction
 configured via the `query_rewrite` configuration option. See [row-level access][ref-dap-rls] to
 learn more about policy evaluation.
 
+<InfoBox>
+
+A policy restricts the rows of the cube it is defined on, and only that cube. When a query
+[joins][ref-joins] to a cube whose rows are restricted by a policy, the filters of that policy
+are applied to the join itself, so rows of the other cubes are not dropped along with the rows
+the policy hides. In a query over `orders` and its joined `shipments`, a policy on `shipments`
+therefore still returns the orders that have no shipment the current user may see, with the
+`shipments` members set to `NULL`. Unlike a filter in a query, a policy never turns the
+`LEFT JOIN` that Cube generates into an `INNER JOIN`.
+
+</InfoBox>
+
 
 [ref-ref-cubes]: /product/data-modeling/reference/cube
 [ref-ref-views]: /product/data-modeling/reference/view
+[ref-joins]: /product/data-modeling/reference/joins
 [ref-dap]: /product/auth/data-access-policies
 [ref-dap-roles]: /product/auth/data-access-policies#data-access-roles
 [ref-dap-mls]: /product/auth/data-access-policies#member-level-access

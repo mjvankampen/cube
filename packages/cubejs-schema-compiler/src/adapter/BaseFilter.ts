@@ -22,9 +22,16 @@ export class BaseFilter extends BaseDimension {
 
   public readonly camelizeOperator: any;
 
+  /**
+   * Set for filters derived from an access policy's `row_level.filters`.
+   * @see BaseQuery#rowLevelSecurityFilterCube
+   */
+  public readonly rowLevelSecurity: boolean;
+
   public constructor(query: BaseQuery, filter: any) {
     super(query, filter.dimension);
     this.measure = filter.measure;
+    this.rowLevelSecurity = !!filter.rowLevelSecurity;
 
     this.operator = filter.operator;
     this.values = filter.values;

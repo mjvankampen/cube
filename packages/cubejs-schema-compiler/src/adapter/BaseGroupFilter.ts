@@ -7,11 +7,18 @@ export class BaseGroupFilter {
 
   public readonly dimension: any;
 
+  /**
+   * Set for filters derived from an access policy's `row_level.filters`.
+   * @see BaseQuery#rowLevelSecurityFilterCube
+   */
+  public readonly rowLevelSecurity: boolean;
+
   public constructor(filter: any) {
     this.values = filter.values;
     this.operator = filter.operator;
     this.measure = filter.measure;
     this.dimension = filter.dimension;
+    this.rowLevelSecurity = !!filter.rowLevelSecurity;
   }
 
   public isDateOperator(): boolean {

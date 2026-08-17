@@ -276,50 +276,6 @@ Array [
 ]
 `;
 
-exports[`Cube RBAC Engine RBAC via SQL API SELECT * from line_items_view_joined_orders: orders_view 1`] = `
-Array [
-  Object {
-    "__cubeJoinField": null,
-    "__user": null,
-    "count": "1",
-    "created_at": 2018-10-23T07:54:39.000Z,
-    "id": 1,
-    "orders_count": "1",
-    "orders_created_at": 2018-10-23T07:54:39.000Z,
-    "orders_id": 1,
-    "price": 267,
-    "price_dim": 267,
-    "quantity": 2,
-  },
-  Object {
-    "__cubeJoinField": null,
-    "__user": null,
-    "count": "1",
-    "created_at": 2019-12-16T08:09:36.000Z,
-    "id": 10,
-    "orders_count": "1",
-    "orders_created_at": 2019-12-16T08:09:36.000Z,
-    "orders_id": 10,
-    "price": 68,
-    "price_dim": 68,
-    "quantity": 6,
-  },
-  Object {
-    "__cubeJoinField": null,
-    "__user": null,
-    "count": "1",
-    "created_at": 2019-04-22T15:52:17.000Z,
-    "id": 11,
-    "orders_count": "1",
-    "orders_created_at": 2019-04-22T15:52:17.000Z,
-    "orders_id": 11,
-    "price": 170,
-    "price_dim": 170,
-    "quantity": 1,
-  },
-]
-`;
-
 exports[`Cube RBAC Engine RBAC via SQL API SELECT * from line_items_view_no_policy: line_items_view_no_policy 1`] = `
 Array [
   Object {

@@ -162,6 +162,19 @@ filtered by the row-level security rules of both views.
 
 </InfoBox>
 
+_When a query [joins][ref-joins] cubes,_ the row-level filters of each cube apply to that
+cube only. All joins Cube generates are `LEFT JOIN`s, and a policy on a joined cube does not
+change that: rows of the other cubes are kept even when the joined cube has no row the current
+user may see, with the members of the joined cube set to `NULL`.
+
+<InfoBox>
+
+This is what makes a policy differ from a filter in a query, which does turn a `LEFT JOIN`
+into an `INNER JOIN`. Adding a policy to a cube is meant to restrict access to that cube, so
+it must not change which rows of the other cubes in a query are returned.
+
+</InfoBox>
+
 
 [ref-mls]: /product/auth/member-level-security
 [ref-mls-public]: /product/auth/member-level-security#managing-member-level-access
@@ -170,4 +183,5 @@ filtered by the row-level security rules of both views.
 [ref-sec-ctx]: /product/auth/context
 [ref-ctx-to-roles]: /product/configuration/reference/config#context_to_roles
 [ref-ref-dap]: /product/data-modeling/reference/data-access-policies
+[ref-joins]: /product/data-modeling/reference/joins
 [ref-config-queryrewrite]: /product/configuration/reference/config#query_rewrite
